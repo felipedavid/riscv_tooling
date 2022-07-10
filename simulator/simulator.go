@@ -57,6 +57,7 @@ type Reg uint8
 type Instruction struct {
 	op           Op
 	rs1, rs2, rd Reg
+	imm          uint32
 }
 
 func bits(data uint32, start uint32, length uint32) uint32 {
@@ -120,6 +121,7 @@ var funct3ToCsrOp = []Op{
 }
 
 func decodeIInstruction(instr *Instruction, data uint32) {
+	instr.imm = bits(data, 12, 20) << 12
 }
 
 func decodeUInstruction(instr *Instruction, data uint32) {
@@ -189,6 +191,8 @@ func decodeInstruction(data uint32) (instr Instruction) {
 			} else if funct7 != 0b0000000 {
 				instr.op = ILLEGAL_OP
 			}
+		default:
+			decodeIInstruction(&instr, data)
 		}
 	case 0b0110011: // ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND
 		// funct4 is the concatination of funct3 and funct7 fifth bit
