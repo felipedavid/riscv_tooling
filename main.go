@@ -51,20 +51,28 @@ const (
 	CSRRCI
 )
 
-type Op uint8
+type Opcode uint8
 type Reg uint8
+type Word uint32
 
 type Instruction struct {
-	op           Op
+	op           Opcode
 	rs1, rs2, rd Reg
-	imm          uint32
+	imm          Word
 }
 
-func bits(data uint32, start uint32, length uint32) uint32 {
-	return (data >> start) & ((1 << length) - 1)
-}
+const (
+	opcodeMask uint32 = (1 << 7) - 1
+	regMask    uint32 = (1 << 5) - 1
+	rdMask     uint32 = regMask << 7
+	rs1Mask    uint32 = regMask << 15
+	rs2Mask    uint32 = regMask << 20
+	funct3Mask uint32 = ((1 << 3) - 1) << 12
+	funct7Mask uint32 = ((1 << 7) - 1) << 25
+	fenceMask  uint32 = 0b1111_0000_0000_11111_111_11111_1111111
+)
 
-var funct3ToBranchOp = []Op{
+var funct3ToBranchOp = []Opcode{
 	0b000: BEQ,
 	0b001: BNE,
 	0b100: BLT,
@@ -73,7 +81,7 @@ var funct3ToBranchOp = []Op{
 	0b111: BGEU,
 }
 
-var funct3ToLoadOp = []Op{
+var funct3ToLoadOp = []Opcode{
 	0b000: LB,
 	0b001: LH,
 	0b010: LW,
@@ -81,13 +89,13 @@ var funct3ToLoadOp = []Op{
 	0b101: LHU,
 }
 
-var funct3ToStoreOp = []Op{
+var funct3ToStoreOp = []Opcode{
 	0b000: SB,
 	0b001: SH,
 	0b010: SW,
 }
 
-var funct3ToImmOp = []Op{
+var funct3ToImmOp = []Opcode{
 	0b000: ADDI,
 	0b010: SLTI,
 	0b011: SLTIU,
@@ -95,10 +103,10 @@ var funct3ToImmOp = []Op{
 	0b110: ORI,
 	0b111: ANDI,
 	0b001: SLLI,
-	0b101: SRLI,
+	0b101: SRLI, // or SRAI
 }
 
-var funct4ToRegOp = []Op{
+var funct4ToRegOp = []Opcode{
 	0b0000: ADD,
 	0b1000: SUB,
 	0b0001: SLL,
@@ -111,7 +119,7 @@ var funct4ToRegOp = []Op{
 	0b0111: AND,
 }
 
-var funct3ToCsrOp = []Op{
+var funct3ToCSROp = []Opcode{
 	0b001: CSRRW,
 	0b010: CSRRS,
 	0b011: CSRRC,
@@ -120,38 +128,52 @@ var funct3ToCsrOp = []Op{
 	0b111: CSRRCI,
 }
 
-func decodeIInstruction(instr *Instruction, data uint32) {
-	instr.imm = bits(data, 12, 20) << 12
+func decodeBInstruction(instr *Instruction, data uint32) {
+
 }
 
 func decodeUInstruction(instr *Instruction, data uint32) {
+
+}
+
+func decodeIInstruction(instr *Instruction, data uint32) {
+
 }
 
 func decodeJInstruction(instr *Instruction, data uint32) {
-}
 
-func decodeBInstruction(instr *Instruction, data uint32) {
 }
 
 func decodeSInstruction(instr *Instruction, data uint32) {
+
 }
 
-func decodeInstruction(data uint32) (instr Instruction) {
-	rs1 := Reg(bits(data, 15, 5))
-	rs2 := Reg(bits(data, 20, 5))
-	rd := Reg(bits(data, 7, 5))
+func decodeRInstruction(instr *Instruction, data uint32) {
 
-	funct3 := bits(data, 12, 3)
-	funct7 := bits(data, 25, 7)
+}
 
-	instr = Instruction{
+func decodeCSRInstruction(instr *Instruction, data uint32) {
+
+}
+
+func DecodeInstruction(data uint32) Instruction {
+	rs1 := Reg(data & rs1Mask >> 15)
+	rs2 := Reg(data & rs2Mask >> 20)
+	rd := Reg(data & rdMask >> 7)
+
+	// Since Golang automagically initialized instr.op to 0 (ILLEGAL_OP),
+	// in some cases I will not set instr.op to ILLEGAL_OP because it already
+	// holds this value
+	instr := Instruction{
 		rs1: rs1,
 		rs2: rs2,
 		rd:  rd,
 	}
 
-	// Figure out which instruction we are talking about
-	switch op := bits(data, 0, 7); op {
+	funct3 := data & funct3Mask >> 12
+	funct7 := data & funct7Mask >> 25
+
+	switch Opcode(data & opcodeMask) {
 	case 0b0110111: // LUI
 		instr.op = LUI
 		decodeUInstruction(&instr, data)
@@ -162,14 +184,11 @@ func decodeInstruction(data uint32) (instr Instruction) {
 		instr.op = JAL
 		decodeJInstruction(&instr, data)
 	case 0b1100111: // JALR
-		instr.op = JALR
+		if funct3 == 0b000 {
+			instr.op = JALR
+		}
 		decodeIInstruction(&instr, data)
-
-	// Some instructions share the same opcode and only differenciate based on
-	// the funct fields
 	case 0b1100011: // BEQ, BNE, BLT, BGE, BLTU, BGEU
-		// We are using tables to minimize branching. This small optimization
-		// might be silly, but I don't care :P
 		instr.op = funct3ToBranchOp[funct3]
 		decodeBInstruction(&instr, data)
 	case 0b0000011: // LB, LH, LW, LBU, LHU
@@ -185,27 +204,26 @@ func decodeInstruction(data uint32) (instr Instruction) {
 			if funct7 != 0b0000000 {
 				instr.op = ILLEGAL_OP
 			}
-		case SRLI:
+		case SRLI: // SRAI
 			if funct7 == 0b0100000 {
 				instr.op = SRAI
 			} else if funct7 != 0b0000000 {
 				instr.op = ILLEGAL_OP
 			}
-		default:
-			decodeIInstruction(&instr, data)
 		}
+		decodeIInstruction(&instr, data)
 	case 0b0110011: // ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND
-		// funct4 is the concatination of funct3 and funct7 fifth bit
-		mask := 0b0100000
-		// To the instruction be valid, all bits select by ^mask (0b1011111) must be zero
-		if (funct7 & ^mask) == 0 {
-			funct4 := funct3 | ((funct7 & mask) >> 2)
+		var mask uint32 = 0b0100000
+		if funct7 & ^mask == 0b0000000 {
+			funct4 := ((funct7 & mask) >> 2) | funct3
 			instr.op = funct4ToRegOp[funct4]
 		}
-	case 0b0001111: // FENCE, FENCEI
+		decodeRInstruction(&instr, data)
+	case 0b0001111: // FENCE, FENCE.I
 		if data == 0b0000_0000_0000_00000_001_00000_0001111 {
 			instr.op = FENCEI
-		} else if (data & 0b1111_0000_0000_11111_111_11111_0000000) == 0 {
+		} else if data&fenceMask == 0b0000_0000_0000_00000_000_00000_0001111 {
+			// Reminder: I'm not decoding the pred/succ fields
 			instr.op = FENCE
 		}
 	case 0b1110011: // ECALL, EBREAK, CSRRW, CSRRS, CSRRC, CSRRWI, CSRRSI, CSRRCI
@@ -214,19 +232,19 @@ func decodeInstruction(data uint32) (instr Instruction) {
 		} else if data == 0b000000000001_00000_000_00000_1110011 {
 			instr.op = EBREAK
 		} else {
-			instr.op = funct3ToCsrOp[funct3]
-			decodeCsrInstruction(&instr, data)
+			instr.op = funct3ToCSROp[funct3]
+			decodeCSRInstruction(&instr, data)
 		}
 	default:
+		// This is kinda redundant since Go is already initializing instr.op to 0 and ILLEGAL_OP == 0
 		instr.op = ILLEGAL_OP
 	}
 
-	return
+	return instr
 }
 
-func encodeInstruction(instr Instruction) (data uint32) {
-	data = 0
-	return data
+func EncodeInstruction(instr Instruction) uint32 {
+	return 0
 }
 
 func main() {
