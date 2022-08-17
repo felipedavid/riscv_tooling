@@ -1,5 +1,19 @@
 package main
 
+import (
+	"fmt"
+	"log"
+	"unsafe"
+)
+
+func signExtendByte(val uint32) uint32 {
+	return uint32(int32(val<<24) >> 24)
+}
+
+func signExtendHalfWord(val uint32) uint32 {
+	return uint32(int32(val<<16) >> 16)
+}
+
 const (
 	ILLEGAL_OP = iota
 	LUI
@@ -52,13 +66,12 @@ const (
 )
 
 type Opcode uint8
-type Reg uint8
-type Word uint32
 
 type Instruction struct {
 	op           Opcode
-	rs1, rs2, rd Reg
-	imm          Word
+	rs1, rs2, rd uint8
+	csr          uint16
+	imm          uint32
 }
 
 const (
@@ -135,21 +148,25 @@ var funct3ToCSROp = []Opcode{
 	0b111: CSRRCI,
 }
 
+func bits(x, min, max uint32) uint32 {
+	return (x >> min) & (1<<(max-min) - 1)
+}
+
 func decodeBInstruction(instr *Instruction, data uint32) {
 	imm12 := data >> 31
 	imm11 := (data >> 7) & 1
 	imm10_5 := (data >> 25) & ((1 << 6) - 1)
 	imm4_1 := (data >> 8) & ((1 << 4) - 1)
 	imm := (imm12 << 12) | (imm11 << 11) | (imm10_5 << 5) | (imm4_1 << 1)
-	instr.imm = Word(int32(imm<<19) >> 19)
+	instr.imm = uint32(int32(imm<<19) >> 19)
 }
 
 func decodeUInstruction(instr *Instruction, data uint32) {
-	instr.imm = Word(data & immUMask)
+	instr.imm = uint32(data & immUMask)
 }
 
 func decodeIInstruction(instr *Instruction, data uint32) {
-	instr.imm = Word(int32(data&immIMask) >> 20)
+	instr.imm = uint32(int32(data&immIMask) >> 20)
 }
 
 func decodeJInstruction(instr *Instruction, data uint32) {
@@ -158,24 +175,20 @@ func decodeJInstruction(instr *Instruction, data uint32) {
 	imm11 := (data >> 20) & 1
 	imm10_1 := (data >> 21) & ((1 << 10) - 1)
 	imm := (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1)
-	instr.imm = Word(int32(imm<<11) >> 11)
+	instr.imm = uint32(int32(imm<<11) >> 11)
 }
 
 func decodeSInstruction(instr *Instruction, data uint32) {
 	// TODO: Make sure this works as expected
 	hiImm := uint32(int32(data)>>int32(immSHiShiftAmount)) << 5
 	loImm := (data >> immSLoShiftAmount) & immSLoMask
-	instr.imm = Word(hiImm | loImm)
-}
-
-func decodeCSRInstruction(instr *Instruction, data uint32) {
-
+	instr.imm = uint32(hiImm | loImm)
 }
 
 func DecodeInstruction(data uint32) Instruction {
-	rs1 := Reg((data >> rs1ShiftAmount) & regMask)
-	rs2 := Reg((data >> rs2ShiftAmount) & regMask)
-	rd := Reg((data >> rdShiftAmount) & regMask)
+	rs1 := uint8((data >> rs1ShiftAmount) & regMask)
+	rs2 := uint8((data >> rs2ShiftAmount) & regMask)
+	rd := uint8((data >> rdShiftAmount) & regMask)
 
 	// Since Golang automagically initialized instr.op to 0 (ILLEGAL_OP),
 	// in some cases I will not set instr.op to ILLEGAL_OP because it already
@@ -217,17 +230,20 @@ func DecodeInstruction(data uint32) Instruction {
 		instr.op = funct3ToImmOp[funct3]
 		switch instr.op {
 		case SLLI:
+			instr.imm = uint32(rs2)
 			if funct7 != 0b0000000 {
 				instr.op = ILLEGAL_OP
 			}
 		case SRLI: // SRAI
+			instr.imm = uint32(rs2)
 			if funct7 == 0b0100000 {
 				instr.op = SRAI
 			} else if funct7 != 0b0000000 {
 				instr.op = ILLEGAL_OP
 			}
+		default:
+			decodeIInstruction(&instr, data)
 		}
-		decodeIInstruction(&instr, data)
 	case 0b0110011: // ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND
 		var mask uint32 = 0b0100000
 		if funct7 & ^mask == 0b0000000 {
@@ -248,7 +264,8 @@ func DecodeInstruction(data uint32) Instruction {
 			instr.op = EBREAK
 		} else {
 			instr.op = funct3ToCSROp[funct3]
-			decodeCSRInstruction(&instr, data)
+			instr.rs1 = uint8((data >> 15) & regMask)
+			instr.csr = uint16(data >> 20)
 		}
 	default:
 		// This is kinda redundant since Go is already initializing instr.op to 0 and ILLEGAL_OP == 0
@@ -262,5 +279,254 @@ func EncodeInstruction(instr Instruction) uint32 {
 	return 0
 }
 
+type Hart struct {
+	pc      uint32
+	regFile [32]uint32
+	mem     [4096]uint8
+}
+
+func (h *Hart) printState() {
+	fmt.Printf("pc = %d (0x%x)\n", h.pc, h.pc)
+	for i := 1; i < 32; i++ {
+		fmt.Printf("x%d = %d (0x%x)\n", i, h.regFile[i], h.regFile[i])
+	}
+}
+
+func (h *Hart) readInstruction(addr uint32) uint32 {
+	if addr+4 < uint32(len(h.mem)) {
+		return *(*uint32)(unsafe.Pointer(&h.mem[addr]))
+	}
+	return 0
+}
+
+func (h *Hart) readRegister(regIndex uint8) uint32 {
+	return h.regFile[regIndex]
+}
+
+func (h *Hart) writeRegister(regIndex uint8, val uint32) {
+	if regIndex != 0 {
+		h.regFile[regIndex] = val
+	}
+}
+
+func (h *Hart) loadByte(addr uint32) uint32 {
+	if addr < uint32(len(h.mem)) {
+		return uint32(h.mem[addr])
+	}
+	return 0
+}
+
+func (h *Hart) loadHalfWord(addr uint32) uint32 {
+	if addr+1 < uint32(len(h.mem)) {
+		val := *(*uint16)(unsafe.Pointer(&h.mem[addr]))
+		return uint32(val)
+	}
+	return 0
+}
+
+func (h *Hart) loadWord(addr uint32) uint32 {
+	if addr+3 < uint32(len(h.mem)) {
+		return *(*uint32)(unsafe.Pointer(&h.mem[addr]))
+	}
+	return 0
+}
+
+func (h *Hart) storeByte(addr, val uint32) {
+	if addr < uint32(len(h.mem)) {
+		h.mem[addr] = uint8(val)
+	}
+}
+
+func (h *Hart) storeHalfWord(addr, val uint32) {
+	if addr+1 < uint32(len(h.mem)) {
+		*(*uint16)(unsafe.Pointer(&h.mem[addr])) = uint16(val)
+	}
+}
+
+func (h *Hart) storeWord(addr, val uint32) {
+	if addr+3 < uint32(len(h.mem)) {
+		*(*uint32)(unsafe.Pointer(&h.mem[addr])) = val
+	}
+}
+
+func (h *Hart) readCsr(csr uint16) uint32 {
+	return 0
+}
+
+func (h *Hart) writeCsr(csr uint16, val uint32) {
+
+}
+
+const shiftMask uint32 = (1 << 5) - 1
+
+func (h *Hart) step() {
+	for {
+		instrData := h.readInstruction()
+		instr := DecodeInstruction(instrData)
+
+		rs1 := instr.rs1
+		rs2 := instr.rs2
+		rd := instr.rd
+		imm := instr.imm
+		csr := instr.csr
+
+		rs1Val := h.regFile[rs1]
+		rs2Val := h.regFile[rs2]
+
+		nextPc := h.pc + 4
+		branchPc := h.pc + imm
+
+		switch instr.op {
+		case LUI:
+			h.writeRegister(rd, imm)
+		case AUIPC:
+			h.writeRegister(rd, branchPc)
+		case JAL:
+			h.writeRegister(rd, nextPc)
+			nextPc = branchPc
+		case JALR:
+			h.writeRegister(rd, nextPc)
+			nextPc = (imm + rs1Val) & ^uint32(1)
+		case BEQ:
+			if rs1Val == rs2Val {
+				nextPc = branchPc
+			}
+		case BNE:
+			if rs1Val != rs2Val {
+				nextPc = branchPc
+			}
+		case BLT:
+			if int32(rs1Val) < int32(rs2Val) {
+				nextPc = branchPc
+			}
+		case BGE:
+			if int32(rs1Val) >= int32(rs2Val) {
+				nextPc = branchPc
+			}
+		case BLTU:
+			if rs1Val < rs2Val {
+				nextPc = branchPc
+			}
+		case BGEU:
+			if rs1Val >= rs2Val {
+				nextPc = branchPc
+			}
+		case LB:
+			h.writeRegister(rd, signExtendByte(h.loadByte(rs1Val+imm)))
+		case LH:
+			h.writeRegister(rd, signExtendHalfWord(h.loadHalfWord(rs1Val+imm)))
+		case LW:
+			h.writeRegister(rd, h.loadWord(rs1Val+imm))
+		case LBU:
+			h.writeRegister(rd, h.loadByte(rs1Val+imm))
+		case LHU:
+			h.writeRegister(rd, h.loadHalfWord(rs1Val+imm))
+		case SB:
+			h.storeByte(rs1Val+imm, rs2Val)
+		case SH:
+			h.storeHalfWord(rs1Val+imm, rs2Val)
+		case SW:
+			h.storeWord(rs1Val+imm, rs2Val)
+		case ADDI:
+			h.writeRegister(rd, rs1Val+imm)
+		case SLTI:
+			val := uint32(0)
+			if int32(rs1Val) < int32(imm) {
+				val = 1
+			}
+			h.writeRegister(rd, val)
+		case SLTIU:
+			val := uint32(0)
+			if rs1Val < imm {
+				val = 1
+			}
+			h.writeRegister(rd, val)
+		case XORI:
+			h.writeRegister(rd, rs1Val^imm)
+		case ORI:
+			h.writeRegister(rd, rs1Val|imm)
+		case ANDI:
+			h.writeRegister(rd, rs1Val&imm)
+		case SLLI:
+			h.writeRegister(rd, rs1Val<<imm)
+		case SRLI:
+			h.writeRegister(rd, rs1Val>>imm)
+		case SRAI:
+			h.writeRegister(rd, int32(rs1Val)>>int32(imm))
+		case ADD:
+			h.writeRegister(rd, rs1Val+rs2Val)
+		case SUB:
+			h.writeRegister(rd, rs1Val-rs2Val)
+		case SLL:
+			h.writeRegister(rd, rs1Val<<(rs2Val&shiftMask))
+		case SLT:
+			val := uint32(0)
+			if int32(rs1Val) < int32(rs2Val) {
+				val = 1
+			}
+			h.writeRegister(rd, val)
+		case SLTU:
+			val := uint32(0)
+			if rs1Val < rs2Val {
+				val = 1
+			}
+			h.writeRegister(rd, val)
+		case XOR:
+			h.writeRegister(rd, rs1Val^rs2Val)
+		case SRL:
+			h.writeRegister(rd, rs1Val>>(rs2Val&shiftMask))
+		case SRA:
+			h.writeRegister(rd, int32(rs1Val)>>(int32(rs2Val)&int32(shiftMask)))
+		case OR:
+			h.writeRegister(rd, rs1Val|rs2Val)
+		case AND:
+			h.writeRegister(rd, rs1Val&rs2Val)
+		case FENCE:
+		case FENCEI:
+		case ECALL:
+		case EBREAK:
+		case CSRRW:
+			if rd != 0 {
+				csrVal := h.readCsr(csr)
+				h.writeRegister(rd, csrVal)
+			}
+			h.writeCsr(csr, rs1Val)
+		case CSRRS:
+			csrVal := h.readCsr(csr)
+			h.writeRegister(rd, csrVal)
+			if rs1 != 0 {
+				h.writeCsr(csr, csrVal|rs1Val)
+			}
+		case CSRRC:
+			csrVal := h.readCsr(csr)
+			if rs1 != 0 {
+				h.writeRegister(rd, csrVal&(^rs1Val))
+			}
+		case CSRRWI:
+			if rd != 0 {
+				csrVal := h.readCsr(csr)
+				h.writeRegister(rd, csrVal)
+			}
+			h.writeCsr(csr, imm)
+		case CSRRSI:
+			csrVal := h.readCsr(csr)
+			h.writeRegister(rd, csrVal)
+			if imm != 0 {
+				h.writeCsr(csr, csrVal|imm)
+			}
+		case CSRRCI:
+			csrVal := h.readCsr(csr)
+			if rs1 != 0 {
+				h.writeRegister(rd, csrVal&(^imm))
+			}
+		default:
+			log.Fatal("Instruction not implemented yet. (%v)", instr.op)
+		}
+		h.pc = nextPc
+	}
+}
+
 func main() {
+	hart := Hart{}
+	hart.printState()
 }
