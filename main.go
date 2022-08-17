@@ -72,7 +72,11 @@ const (
 	funct7ShiftAmount uint32 = 25
 	funct7Mask        uint32 = (1 << 7) - 1
 	fenceMask         uint32 = 0b1111_0000_0000_11111_111_11111_1111111
-	immUiMask         uint32 = ((1 << 20) - 1) << 12
+	immUMask          uint32 = ((1 << 20) - 1) << 12
+	immIMask          uint32 = ((1 << 12) - 1) << 20
+	immSLoShiftAmount uint32 = 7
+	immSHiShiftAmount uint32 = 25
+	immSLoMask        uint32 = (1 << 5) - 1
 )
 
 var funct3ToBranchOp = []Opcode{
@@ -132,27 +136,36 @@ var funct3ToCSROp = []Opcode{
 }
 
 func decodeBInstruction(instr *Instruction, data uint32) {
-
+	imm12 := data >> 31
+	imm11 := (data >> 7) & 1
+	imm10_5 := (data >> 25) & ((1 << 6) - 1)
+	imm4_1 := (data >> 8) & ((1 << 4) - 1)
+	imm := (imm12 << 12) | (imm11 << 11) | (imm10_5 << 5) | (imm4_1 << 1)
+	instr.imm = Word(int32(imm<<19) >> 19)
 }
 
 func decodeUInstruction(instr *Instruction, data uint32) {
-	instr.imm = Word(data & immUiMask)
+	instr.imm = Word(data & immUMask)
 }
 
 func decodeIInstruction(instr *Instruction, data uint32) {
-
+	instr.imm = Word(int32(data&immIMask) >> 20)
 }
 
 func decodeJInstruction(instr *Instruction, data uint32) {
-
+	imm20 := data >> 31
+	imm19_12 := (data >> 12) & ((1 << 8) - 1)
+	imm11 := (data >> 20) & 1
+	imm10_1 := (data >> 21) & ((1 << 10) - 1)
+	imm := (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1)
+	instr.imm = Word(int32(imm<<11) >> 11)
 }
 
 func decodeSInstruction(instr *Instruction, data uint32) {
-
-}
-
-func decodeRInstruction(instr *Instruction, data uint32) {
-
+	// TODO: Make sure this works as expected
+	hiImm := uint32(int32(data)>>int32(immSHiShiftAmount)) << 5
+	loImm := (data >> immSLoShiftAmount) & immSLoMask
+	instr.imm = Word(hiImm | loImm)
 }
 
 func decodeCSRInstruction(instr *Instruction, data uint32) {
