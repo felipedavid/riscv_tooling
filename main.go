@@ -62,14 +62,17 @@ type Instruction struct {
 }
 
 const (
-	opcodeMask uint32 = (1 << 7) - 1
-	regMask    uint32 = (1 << 5) - 1
-	rdMask     uint32 = regMask << 7
-	rs1Mask    uint32 = regMask << 15
-	rs2Mask    uint32 = regMask << 20
-	funct3Mask uint32 = ((1 << 3) - 1) << 12
-	funct7Mask uint32 = ((1 << 7) - 1) << 25
-	fenceMask  uint32 = 0b1111_0000_0000_11111_111_11111_1111111
+	opcodeMask        uint32 = (1 << 7) - 1
+	regMask           uint32 = (1 << 5) - 1
+	rdShiftAmount     uint32 = 7
+	rs1ShiftAmount    uint32 = 15
+	rs2ShiftAmount    uint32 = 20
+	funct3ShiftAmount uint32 = 12
+	funct3Mask        uint32 = (1 << 3) - 1
+	funct7ShiftAmount uint32 = 25
+	funct7Mask        uint32 = (1 << 7) - 1
+	fenceMask         uint32 = 0b1111_0000_0000_11111_111_11111_1111111
+	immUiMask         uint32 = ((1 << 20) - 1) << 12
 )
 
 var funct3ToBranchOp = []Opcode{
@@ -133,7 +136,7 @@ func decodeBInstruction(instr *Instruction, data uint32) {
 }
 
 func decodeUInstruction(instr *Instruction, data uint32) {
-
+	instr.imm = Word(data & immUiMask)
 }
 
 func decodeIInstruction(instr *Instruction, data uint32) {
@@ -157,9 +160,9 @@ func decodeCSRInstruction(instr *Instruction, data uint32) {
 }
 
 func DecodeInstruction(data uint32) Instruction {
-	rs1 := Reg(data & rs1Mask >> 15)
-	rs2 := Reg(data & rs2Mask >> 20)
-	rd := Reg(data & rdMask >> 7)
+	rs1 := Reg((data >> rs1ShiftAmount) & regMask)
+	rs2 := Reg((data >> rs2ShiftAmount) & regMask)
+	rd := Reg((data >> rdShiftAmount) & regMask)
 
 	// Since Golang automagically initialized instr.op to 0 (ILLEGAL_OP),
 	// in some cases I will not set instr.op to ILLEGAL_OP because it already
@@ -170,8 +173,8 @@ func DecodeInstruction(data uint32) Instruction {
 		rd:  rd,
 	}
 
-	funct3 := data & funct3Mask >> 12
-	funct7 := data & funct7Mask >> 25
+	funct3 := (data >> funct3ShiftAmount) & funct3Mask
+	funct7 := (data >> funct7ShiftAmount) & funct7Mask
 
 	switch Opcode(data & opcodeMask) {
 	case 0b0110111: // LUI
@@ -218,7 +221,6 @@ func DecodeInstruction(data uint32) Instruction {
 			funct4 := ((funct7 & mask) >> 2) | funct3
 			instr.op = funct4ToRegOp[funct4]
 		}
-		decodeRInstruction(&instr, data)
 	case 0b0001111: // FENCE, FENCE.I
 		if data == 0b0000_0000_0000_00000_001_00000_0001111 {
 			instr.op = FENCEI
