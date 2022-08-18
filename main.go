@@ -285,13 +285,6 @@ type Hart struct {
 	mem     [4096]uint8
 }
 
-func (h *Hart) printState() {
-	fmt.Printf("pc = %d (0x%x)\n", h.pc, h.pc)
-	for i := 1; i < 32; i++ {
-		fmt.Printf("x%d = %d (0x%x)\n", i, h.regFile[i], h.regFile[i])
-	}
-}
-
 func (h *Hart) readInstruction(addr uint32) uint32 {
 	if addr+4 < uint32(len(h.mem)) {
 		return *(*uint32)(unsafe.Pointer(&h.mem[addr]))
@@ -361,7 +354,7 @@ const shiftMask uint32 = (1 << 5) - 1
 
 func (h *Hart) step() {
 	for {
-		instrData := h.readInstruction()
+		instrData := h.readInstruction(0)
 		instr := DecodeInstruction(instrData)
 
 		rs1 := instr.rs1
@@ -452,7 +445,7 @@ func (h *Hart) step() {
 		case SRLI:
 			h.writeRegister(rd, rs1Val>>imm)
 		case SRAI:
-			h.writeRegister(rd, int32(rs1Val)>>int32(imm))
+			h.writeRegister(rd, uint32(int32(rs1Val)>>int32(imm)))
 		case ADD:
 			h.writeRegister(rd, rs1Val+rs2Val)
 		case SUB:
@@ -476,7 +469,7 @@ func (h *Hart) step() {
 		case SRL:
 			h.writeRegister(rd, rs1Val>>(rs2Val&shiftMask))
 		case SRA:
-			h.writeRegister(rd, int32(rs1Val)>>(int32(rs2Val)&int32(shiftMask)))
+			h.writeRegister(rd, uint32(int32(rs1Val)>>(int32(rs2Val)&int32(shiftMask))))
 		case OR:
 			h.writeRegister(rd, rs1Val|rs2Val)
 		case AND:
@@ -523,6 +516,13 @@ func (h *Hart) step() {
 			log.Fatal("Instruction not implemented yet. (%v)", instr.op)
 		}
 		h.pc = nextPc
+	}
+}
+
+func (h *Hart) printState() {
+	fmt.Printf("pc = %d (0x%08x)\n", h.pc, h.pc)
+	for i := 1; i < 32; i++ {
+		fmt.Printf("x%d = %d (0x%08x)\n", i, h.regFile[i], h.regFile[i])
 	}
 }
 
