@@ -148,131 +148,122 @@ var funct3ToCSROp = []Opcode{
 	0b111: CSRRCI,
 }
 
-func bits(x, min, max uint32) uint32 {
-	return (x >> min) & (1<<(max-min) - 1)
+func signExtend(x uint32, width uint32) uint32 {
+	return uint32(int32(x<<(32-width)) >> int32(32-width))
 }
 
-func decodeBInstruction(instr *Instruction, data uint32) {
-	imm12 := data >> 31
-	imm11 := (data >> 7) & 1
-	imm10_5 := (data >> 25) & ((1 << 6) - 1)
-	imm4_1 := (data >> 8) & ((1 << 4) - 1)
-	imm := (imm12 << 12) | (imm11 << 11) | (imm10_5 << 5) | (imm4_1 << 1)
-	instr.imm = uint32(int32(imm<<19) >> 19)
+func bits(data, start, lenn uint32) uint32 {
+	return (data >> start) & ((1 << lenn) - 1)
 }
 
-func decodeUInstruction(instr *Instruction, data uint32) {
-	instr.imm = uint32(data & immUMask)
+func decodeUImmediate(data uint32) uint32 {
+	imm12_31 := bits(data, 12, 20) << 12
+	imm0_31 := imm12_31
+	return signExtend(imm0_31, 32)
 }
 
-func decodeIInstruction(instr *Instruction, data uint32) {
-	instr.imm = uint32(int32(data&immIMask) >> 20)
+func decodeJImmediate(data uint32) uint32 {
+	imm1_10 := bits(data, 21, 10) << 1
+	imm11 := bits(data, 20, 1) << 11
+	imm12_19 := bits(data, 12, 8) << 12
+	imm20 := bits(data, 31, 1) << 20
+	imm0_20 := imm1_10 | imm11 | imm12_19 | imm20
+	return signExtend(imm0_20, 21)
 }
 
-func decodeJInstruction(instr *Instruction, data uint32) {
-	imm20 := data >> 31
-	imm19_12 := (data >> 12) & ((1 << 8) - 1)
-	imm11 := (data >> 20) & 1
-	imm10_1 := (data >> 21) & ((1 << 10) - 1)
-	imm := (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1)
-	instr.imm = uint32(int32(imm<<11) >> 11)
+func decodeBImmediate(data uint32) uint32 {
+	imm1_4 := bits(data, 8, 4) << 1
+	imm5_10 := bits(data, 25, 6) << 5
+	imm11 := bits(data, 7, 1) << 11
+	imm12 := bits(data, 31, 1) << 12
+	imm0_12 := imm1_4 | imm5_10 | imm11 | imm12
+	return signExtend(imm0_12, 13)
 }
 
-func decodeSInstruction(instr *Instruction, data uint32) {
-	// TODO: Make sure this works as expected
-	hiImm := uint32(int32(data)>>int32(immSHiShiftAmount)) << 5
-	loImm := (data >> immSLoShiftAmount) & immSLoMask
-	instr.imm = uint32(hiImm | loImm)
+func decodeIImmediate(data uint32) uint32 {
+	imm0_11 := bits(data, 20, 12)
+	return signExtend(imm0_11, 12)
+}
+
+func decodeSImmediate(data uint32) uint32 {
+	imm0_4 := bits(data, 7, 5)
+	imm5_11 := bits(data, 25, 7) << 5
+	imm0_11 := hiImm | loImm
+	return signExtend(imm0_11, 12)
 }
 
 func DecodeInstruction(data uint32) Instruction {
-	rs1 := uint8((data >> rs1ShiftAmount) & regMask)
-	rs2 := uint8((data >> rs2ShiftAmount) & regMask)
-	rd := uint8((data >> rdShiftAmount) & regMask)
+	opcode := bits(data, 0, 7)
+	funct3 := bits(data, 12, 3)
+	funct7 := bits(data, 25, 7)
+	rs1 := bits(data, 15, 5)
+	rs2 := bits(data, 20, 5)
+	rd := bits(data, 7, 5)
 
-	// Since Golang automagically initialized instr.op to 0 (ILLEGAL_OP),
-	// in some cases I will not set instr.op to ILLEGAL_OP because it already
-	// holds this value
-	instr := Instruction{
-		rs1: rs1,
-		rs2: rs2,
-		rd:  rd,
-	}
-
-	funct3 := (data >> funct3ShiftAmount) & funct3Mask
-	funct7 := (data >> funct7ShiftAmount) & funct7Mask
-
-	switch Opcode(data & opcodeMask) {
+	switch opcode {
 	case 0b0110111: // LUI
-		instr.op = LUI
-		decodeUInstruction(&instr, data)
+		return Instruction{op: LUI, rd: rd, imm: decodeUImmediate(data)}
 	case 0b0010111: // AUIPC
-		instr.op = AUIPC
-		decodeUInstruction(&instr, data)
+		return Instruction{op: AUIPC, rd: rd, imm: decodeUImmediate(data)}
 	case 0b1101111: // JAL
-		instr.op = JAL
-		decodeJInstruction(&instr, data)
+		return Instruction{op: JAL, rd: rd, imm: decodeJImmediate(data)}
 	case 0b1100111: // JALR
 		if funct3 == 0b000 {
-			instr.op = JALR
+			return Instruction{op: JALR, rd: rd, rs1: rs1, imm: decodeIImmediate(data)}
 		}
-		decodeIInstruction(&instr, data)
 	case 0b1100011: // BEQ, BNE, BLT, BGE, BLTU, BGEU
-		instr.op = funct3ToBranchOp[funct3]
-		decodeBInstruction(&instr, data)
+		return Instruction{op: funct3ToBranchOp[funct3], rs1: rs1, rs2: rs2, imm: decodeBImmediate(data)}
 	case 0b0000011: // LB, LH, LW, LBU, LHU
-		instr.op = funct3ToLoadOp[funct3]
-		decodeIInstruction(&instr, data)
+		return Instruction{op: funct3ToLoadOp[funct3], rd: rd, rs1: rs1, imm: decodeIImmediate(data)}
 	case 0b0100011: // SB, SH, SW
-		instr.op = funct3ToStoreOp[funct3]
-		decodeSInstruction(&instr, data)
+		return Instruction{op: funct3ToStoreOp[funct3], rs1: rs1, rs2: rs2, imm: decodeSImmediate(data)}
 	case 0b0010011: // ADDI, SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI, SRAI
-		instr.op = funct3ToImmOp[funct3]
-		switch instr.op {
+		op = funct3ToImmOp[funct3]
+		switch op {
 		case SLLI:
 			instr.imm = uint32(rs2)
-			if funct7 != 0b0000000 {
-				instr.op = ILLEGAL_OP
+			if funct7 == 0b0000000 {
+				return Instruction{op: SLLI, rd: rd, rs1: rs1, imm: rs2}
 			}
 		case SRLI: // SRAI
-			instr.imm = uint32(rs2)
-			if funct7 == 0b0100000 {
-				instr.op = SRAI
-			} else if funct7 != 0b0000000 {
-				instr.op = ILLEGAL_OP
+			if funct7 == 0b0000000 {
+				return Instruction{op: SRLI, rd: rd, rs1: rs1, imm: rs2}
+			} else if funct7 == 0b0100000 {
+				return Instruction{op: SRAI, rd: rd, rs1: rs1, imm: rs2}
 			}
 		default:
-			decodeIInstruction(&instr, data)
+			return Instruction{op: op, rd: rd, rs1: rs1, imm: decodeIImmediate(data)}
 		}
 	case 0b0110011: // ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND
-		var mask uint32 = 0b0100000
-		if funct7 & ^mask == 0b0000000 {
-			funct4 := ((funct7 & mask) >> 2) | funct3
-			instr.op = funct4ToRegOp[funct4]
+		if funct7&0b1011111 == 0 {
+			funct4 := funct3 | (bits(funct7, 5, 1) << 3)
+			return Instruction{op: funct4ToRegOp[funct4], rd: rd, rs1: rs1, rs2: rs2}
 		}
 	case 0b0001111: // FENCE, FENCE.I
 		if data == 0b0000_0000_0000_00000_001_00000_0001111 {
-			instr.op = FENCEI
+			return Instruction{op: FENCEI}
 		} else if data&fenceMask == 0b0000_0000_0000_00000_000_00000_0001111 {
 			// Reminder: I'm not decoding the pred/succ fields
-			instr.op = FENCE
+			return Instruction{op: FENCE, succPred: bits(data, 20, 8)}
 		}
 	case 0b1110011: // ECALL, EBREAK, CSRRW, CSRRS, CSRRC, CSRRWI, CSRRSI, CSRRCI
 		if data == 0b000000000000_00000_000_00000_1110011 {
-			instr.op = ECALL
+			return Instruction{op: ECALL}
 		} else if data == 0b000000000001_00000_000_00000_1110011 {
-			instr.op = EBREAK
+			return Instruction{op: EBREAK}
 		} else {
-			instr.op = funct3ToCSROp[funct3]
-			instr.rs1 = uint8((data >> 15) & regMask)
-			instr.csr = uint16(data >> 20)
+			op = funct3ToCSROp[funct3]
+			csr := bits(data, 20, 12)
+			if bits(funct3, 2, 1) != 0 {
+				return Instruction{op: op, rd: rd, csr: csr, imm: bits(data, 15, 5)}
+			} else {
+				return Instruction{op: op, rd: rd, csr: csr, rs1: rs1}
+			}
 		}
 	default:
-		// This is kinda redundant since Go is already initializing instr.op to 0 and ILLEGAL_OP == 0
-		instr.op = ILLEGAL_OP
 	}
 
-	return instr
+	return Instruction{op: ILLEGAL_OP}
 }
 
 func EncodeInstruction(instr Instruction) uint32 {
